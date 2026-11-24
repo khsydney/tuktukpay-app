@@ -15,8 +15,9 @@
 # latency distribution. The operation names come from the tracers:
 #   Python FastAPI (ddtrace)                  fastapi.request
 #   Node Express (dd-trace)                   express.request
-#   Go otelhttp + Java manual server span     http.server.request   (OpenTelemetry API on the Datadog tracer)
-# Check them in APM > Services > <service> > Resources after the first traffic; change local.op if needed.
+#   Java manual server span (OTel API)        http.server.request
+#   Go otelhttp on dd-trace-go                post_v1_payments      (from the span name "POST /v1/payments")
+# Checked against live traces on 24 Nov 2026 (env tuktukpay-dd); change local.op if a tracer upgrade renames them.
 
 terraform {
   required_version = ">= 1.5"
@@ -60,7 +61,7 @@ provider "datadog" {
 locals {
   env = var.environment
   op = {
-    "checkout-api"     = "http.server.request"
+    "checkout-api"     = "post_v1_payments" # dd-trace-go names it after the otelhttp span "POST /v1/payments"
     "payment-router"   = "http.server.request"
     "risk-engine"      = "fastapi.request"
     "merchant-copilot" = "fastapi.request"
