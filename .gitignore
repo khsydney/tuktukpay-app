@@ -1,0 +1,14 @@
+.env
+node_modules/
+__pycache__/
+*.pyc
+bin/
+obj/
+.terraform/
+terraform.tfstate*
+*.log
+.DS_Store
+.venv/
+
+# Brand logos are not distributed: add your own splunk-logo-white.svg / favicon.svg to services/*/brand/
+services/*/brand/*.svg
