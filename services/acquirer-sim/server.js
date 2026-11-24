@@ -2,8 +2,8 @@
 // rails a PSP connects to. One process simulates several acquirers, each with
 // its own latency profile and approval behaviour, plus workshop chaos hooks.
 //
-// Instrumented with ZERO code changes: the Splunk Distribution of OpenTelemetry
-// JS is loaded with `node -r @splunk/otel/instrument server.js` (see Dockerfile).
+// Instrumented with ZERO code changes: Datadog's dd-trace is preloaded with
+// `node -r ./dd-init.js server.js` (see Dockerfile).
 // The only OpenTelemetry API usage below adds business attributes to the span
 // the auto-instrumentation already created.
 
@@ -11,11 +11,9 @@
 
 const express = require('express');
 const crypto = require('crypto');
-const { trace, context } = require('@opentelemetry/api');
-// Ships with @splunk/otel. getRPCMetadata() returns the HTTP server span: inside an
-// Express handler trace.getActiveSpan() is the handler's child span, and APM MetricSets
-// (service map Breakdown, Tag Spotlight) only read tags from the server span.
-const { getRPCMetadata } = require('@opentelemetry/core');
+// dd-init.js turns off per-middleware spans, so trace.getActiveSpan() in a handler is the
+// request (service entry) span that Datadog's trace metrics and facets read.
+const { trace } = require('@opentelemetry/api');
 const { ChaosFlags } = require('./chaos');
 const { event } = require('./log');
 
@@ -102,8 +100,6 @@ app.post('/acquirers/:name/authorize', async (req, res) => {
     'payment.card.bin': bin,
   };
   if (span) span.setAttributes(spanAttrs);
-  const serverSpan = getRPCMetadata(context.active())?.span;
-  if (serverSpan && serverSpan !== span) serverSpan.setAttributes(spanAttrs);
 
   // --- chaos: acquirer KBank hangs for one BIN range ------------------------
   if (name === 'acq-kbank' && chaos.enabled('acquirer_kbank_timeout')) {

@@ -1,7 +1,7 @@
 """TukTukPay risk-engine — real-time fraud / risk scoring (Python, FastAPI).
 
-Zero-code instrumented with the Splunk Distribution of OpenTelemetry Python
-(`opentelemetry-instrument uvicorn app:app`). The only OpenTelemetry code in
+Zero-code instrumented by the Datadog tracer (`ddtrace-run uvicorn app:app`,
+DD_TRACE_OTEL_ENABLED=true). The only OpenTelemetry code in
 this file adds *business* context (model version, score, decision) to the spans
 the auto-instrumentation already creates, plus a few custom metrics.
 

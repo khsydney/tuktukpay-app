@@ -10,5 +10,5 @@ terraform.tfstate*
 .DS_Store
 .venv/
 
-# Brand logos are not distributed: add your own splunk-logo-white.svg / favicon.svg to services/*/brand/
+# Brand logos are not distributed: the war-room pages show a logo only if services/*/brand/*.svg is present
 services/*/brand/*.svg

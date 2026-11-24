@@ -3,8 +3,8 @@
 # eksctl-tuktukpay-*, derived from the cluster name.
 #
 # Two arm64 (Graviton) nodes: the Mac builds arm64 images, so docker compose output runs as is.
-# Nodes sit in private subnets behind one NAT gateway, so every outbound call (HEC (HTTP Event Collector)
-# to Splunk Cloud included) leaves from one fixed IP; add that IP to the Splunk Cloud HEC allow list.
+# Nodes sit in private subnets behind one NAT gateway, so every outbound call (to Datadog included)
+# leaves from one fixed IP.
 # About USD 0.60/hour while it exists; tear down with k8s/eks-down.sh (make eks-down).
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig

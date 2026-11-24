@@ -3,6 +3,7 @@
 # taken from .env so one file configures both Docker Compose and Kubernetes:
 #   - ConfigMap tuktukpay-config: BASE_RPS, COPILOT_*, AGENT_*, LOG_LEVEL, AWS_REGION ...
 #   - Secret tuktukpay-secrets:   AMP_SHARED_SECRET and the LLM provider keys
+#   - ConfigMap tuktukpay-datadog: DD_ENV, DD_VERSION and the Datadog tracer settings
 # Deployments read both through envFrom; when either changed, the application pods are
 # rolled so the new values take effect (Postgres and Redis are left alone).
 #   IMAGE_REGISTRY=<registry> NAMESPACE=tuktukpay-team01 DEPLOYMENT_ENVIRONMENT=tuktukpay-team01 k8s/apply.sh
@@ -19,7 +20,7 @@ ROOT=$(cd "$DIR/.." && pwd)
 sed -e "s#\${IMAGE_REGISTRY}#${IMAGE_REGISTRY}#g" \
     -e "s#\${NAMESPACE}#${NAMESPACE}#g" \
     -e "s#\${DEPLOYMENT_ENVIRONMENT}#${DEPLOYMENT_ENVIRONMENT}#g" \
-    -e "s#\${SPLUNK_REALM}#${SPLUNK_REALM:-}#g" \
+    -e "s#\${DD_SITE}#${DD_SITE:-datadoghq.com}#g" \
     -e "s#\${SERVICE_VERSION}#${SERVICE_VERSION}#g" "$DIR/tuktukpay.yaml" | kubectl apply -f -
 
 # Application settings (same names and defaults as docker-compose.yml / .env.example).
@@ -35,9 +36,20 @@ secret_args=(--from-literal="AMP_SHARED_SECRET=${AMP_SHARED_SECRET:-tuktukpay-am
 for key in OPENAI_API_KEY ANTHROPIC_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
   [ -n "${!key:-}" ] && secret_args+=(--from-literal="$key=${!key}")
 done
+# Datadog tracer settings shared by every service (Unified Service Tagging + what Bits AI SRE reads).
+dd_args=()
+for kv in "DD_ENV=$DEPLOYMENT_ENVIRONMENT" "DD_VERSION=$SERVICE_VERSION" \
+          "DD_TRACE_OTEL_ENABLED=true" "DD_METRICS_OTEL_ENABLED=true" \
+          "DD_LOGS_INJECTION=true" "DD_RUNTIME_METRICS_ENABLED=true" \
+          "DD_PROFILING_ENABLED=${DD_PROFILING_ENABLED:-true}" \
+          "DD_TRACE_PROPAGATION_STYLE=datadog,tracecontext,baggage" \
+          'DD_TRACE_SAMPLING_RULES=[{"resource":"GET /healthz","sample_rate":0}]'; do
+  dd_args+=(--from-literal="$kv")
+done
 changes=$( {
   kubectl -n "$NAMESPACE" create configmap tuktukpay-config "${config_args[@]}" --dry-run=client -o yaml | kubectl apply -f -
   kubectl -n "$NAMESPACE" create secret generic tuktukpay-secrets "${secret_args[@]}" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n "$NAMESPACE" create configmap tuktukpay-datadog "${dd_args[@]}" --dry-run=client -o yaml | kubectl apply -f -
 } | tee /dev/stderr | grep -c configured || true)
 
 if [ "$changes" -gt 0 ]; then

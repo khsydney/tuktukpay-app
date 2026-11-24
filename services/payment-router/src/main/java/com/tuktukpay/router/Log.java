@@ -15,13 +15,11 @@ import java.util.Map;
 /**
  * Structured, trace-correlated logging (docs/log-schema.md).
  *
- * Every event is written twice: as one JSON line on stdout (with trace_id / span_id
- * from the current span) for `docker compose logs` and Kubernetes, and through the
- * OpenTelemetry Logs API. The Splunk Java agent bridges the application's
- * opentelemetry-api calls to its own SDK, so the record leaves over OTLP with the
- * span context and the resource (service.name, deployment.environment) attached and
- * ends up in Splunk Cloud Platform. Without the agent the API is a no-op and only
- * stdout remains — the same code runs in the "before instrumentation" demo.
+ * Every event is written as one JSON line on stdout, with trace_id / span_id from the current
+ * span and the Datadog correlation fields (dd.trace_id, dd.span_id, dd.service, dd.env,
+ * dd.version). The Datadog Agent collects container stdout, so each line links to its trace.
+ * The record also goes through the OpenTelemetry Logs API, which is a no-op here unless
+ * DD_LOGS_OTEL_ENABLED=true (then the Datadog agent would export it twice - leave it off).
  *
  * Usage: Log.event(Log.Level.WARN, "acquirer.timeout", "acquirer acq-kbank timed out ...",
  *                  "payment.id", id, "payment.acquirer", "acq-kbank", "duration_ms", 2504L);
@@ -61,7 +59,13 @@ public final class Log {
         if (span.isValid()) {
             line.put("trace_id", span.getTraceId());
             line.put("span_id", span.getSpanId());
+            // Datadog log-trace correlation: decimal ids, lower 64 bits of the trace id.
+            line.put("dd.trace_id", Long.toUnsignedString(Long.parseUnsignedLong(span.getTraceId().substring(16), 16)));
+            line.put("dd.span_id", Long.toUnsignedString(Long.parseUnsignedLong(span.getSpanId(), 16)));
         }
+        line.put("dd.service", System.getenv().getOrDefault("DD_SERVICE", SERVICE));
+        line.put("dd.env", System.getenv().getOrDefault("DD_ENV", ENVIRONMENT));
+        line.put("dd.version", System.getenv().getOrDefault("DD_VERSION", ""));
         System.out.println(Json.write(line));
 
         otel().logRecordBuilder()

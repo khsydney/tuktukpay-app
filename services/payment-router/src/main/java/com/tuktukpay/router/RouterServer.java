@@ -1,9 +1,16 @@
 package com.tuktukpay.router;
 
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
+import io.opentelemetry.context.propagation.TextMapGetter;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -29,14 +36,13 @@ import java.util.stream.Collectors;
  * a PSP "payment orchestration" layer (think one API across many acquirers with
  * primary/backup routing).
  *
- * Deliberately plain Java (JDK HTTP server + client, no framework, no tracing code):
- * every span you see for this service comes from the Splunk Distribution of the
- * OpenTelemetry Java agent attached with -javaagent; the one API call marks the agent's
- * server span as an error when an acquirer attempt timed out. The business attributes are
- * exposed as response headers and captured by the agent
- * (OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_RESPONSE_HEADERS), then renamed by the
- * collector's transform processor into clean span tags. Structured logs go through
- * Log.java (OpenTelemetry Logs API, bridged by the agent) — see docs/log-schema.md.
+ * Deliberately plain Java (JDK HTTP server + client, no framework): the Datadog Java agent
+ * (-javaagent:/dd/dd-java-agent.jar) traces the outgoing JDK HttpClient calls; it has no
+ * instrumentation for the JDK HttpServer, so traced() opens the server span through the
+ * OpenTelemetry API (mapped to a Datadog span, dd.trace.otel.enabled=true) and copies the
+ * routing outcome response headers onto it as span tags (ROUTE_TAGS). The one other API call
+ * marks that span as an error when an acquirer attempt timed out. Structured logs go to
+ * stdout via Log.java — see docs/log-schema.md.
  */
 public final class RouterServer {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(1)).build();
@@ -85,11 +91,56 @@ public final class RouterServer {
     public void start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/healthz", ex -> respond(ex, 200, "{\"status\":\"ok\"}", Map.of()));
-        server.createContext("/v1/route", this::handleRoute);
+        server.createContext("/v1/route", traced("/v1/route", this::handleRoute));
         server.setExecutor(Executors.newFixedThreadPool(64));
         server.start();
         Log.event(Log.Level.INFO, "service.started", "payment-router listening on :" + port + " (acquirers at " + acquirerBase + ", timeout " + acquirerTimeout.toMillis() + " ms)",
                 "server.port", port, "acquirer.base_url", acquirerBase, "acquirer.timeout_ms", acquirerTimeout.toMillis());
+    }
+
+    // Datadog's Java agent has no instrumentation for the JDK's built-in HttpServer, so the
+    // service entry span is made here through the OpenTelemetry API (the agent maps it to a
+    // Datadog span with dd.trace.otel.enabled=true). The parent comes from the incoming
+    // traceparent / x-datadog-* headers, so the trace continues from checkout-api.
+    private static final Tracer TRACER = GlobalOpenTelemetry.getTracer("tuktukpay.payment-router");
+    private static final TextMapGetter<HttpExchange> HEADERS = new TextMapGetter<>() {
+        @Override public Iterable<String> keys(HttpExchange carrier) { return carrier.getRequestHeaders().keySet(); }
+        @Override public String get(HttpExchange carrier, String key) {
+            return carrier == null ? null : carrier.getRequestHeaders().getFirst(key);
+        }
+    };
+
+    // Response headers set by handleRoute -> span tags (Tag-style facets in Datadog APM).
+    private static final Map<String, String> ROUTE_TAGS = Map.of(
+            "x-payment-acquirer", "payment.acquirer", "x-route-attempts", "route.attempts",
+            "x-route-failover", "route.failover", "x-route-outcome", "route.outcome",
+            "x-payment-card-bin", "payment.card.bin");
+
+    private static HttpHandler traced(String route, HttpHandler handler) {
+        return ex -> {
+            Context parent = GlobalOpenTelemetry.getPropagators().getTextMapPropagator().extract(Context.current(), ex, HEADERS);
+            Span span = TRACER.spanBuilder(ex.getRequestMethod() + " " + route).setParent(parent).setSpanKind(SpanKind.SERVER)
+                    .setAttribute("http.request.method", ex.getRequestMethod())
+                    .setAttribute("http.route", route)
+                    .setAttribute("url.path", ex.getRequestURI().getPath())
+                    .startSpan();
+            try (Scope ignored = span.makeCurrent()) {
+                handler.handle(ex);
+                int code = ex.getResponseCode();
+                span.setAttribute("http.response.status_code", code);
+                ROUTE_TAGS.forEach((header, tag) -> {
+                    String v = ex.getResponseHeaders().getFirst(header);
+                    if (v != null) span.setAttribute(tag, v);
+                });
+                if (code >= 500) span.setStatus(StatusCode.ERROR);
+            } catch (IOException | RuntimeException e) {
+                span.recordException(e);
+                span.setStatus(StatusCode.ERROR);
+                throw e;
+            } finally {
+                span.end();
+            }
+        };
     }
 
     private void handleRoute(HttpExchange ex) throws IOException {

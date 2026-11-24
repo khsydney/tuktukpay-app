@@ -1,7 +1,7 @@
 """merchant-storefront (loadgen) — simulates TukTukPay's merchants calling the
 payments API, and merchant staff asking the copilot questions.
 
-It is instrumented (Splunk distro, httpx) on purpose: its CLIENT spans are the
+It is instrumented (ddtrace-run, httpx) on purpose: its CLIENT spans are the
 roots of every trace, exactly like a merchant's backend would be in production.
 
 Traffic shape is controlled by the chaos-controller flags:

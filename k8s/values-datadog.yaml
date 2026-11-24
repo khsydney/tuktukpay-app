@@ -1,0 +1,38 @@
+# Datadog Agent (Helm chart datadog/datadog 3.276.0) for TukTukPay, installed by k8s/datadog-agent.sh.
+# One Agent pod per node plus the Cluster Agent. What Bits AI SRE needs from it:
+#   - APM: the services' Datadog tracers send to the node's Agent on hostPort 8126 (DD_AGENT_HOST = node IP)
+#   - logs: every container's stdout (the services log one JSON line per event)
+#   - Kubernetes state, events, containers and live processes (restarts, OOMKilled, rollouts for Change Tracking)
+#   - OTLP/HTTP on hostPort 4318: the services' OpenTelemetry metrics (tuktukpay.*) via DD_METRICS_OTEL_ENABLED
+# The API key comes from Secret datadog-secret (key api-key), created by datadog-agent.sh from .env.
+# site, clusterName and the env tag are set on the command line by datadog-agent.sh.
+datadog:
+  apiKeyExistingSecret: datadog-secret
+  logs:
+    enabled: true
+    containerCollectAll: true
+    autoMultiLineDetection: true
+  apm:
+    portEnabled: true            # hostPort 8126 for the tracers
+    instrumentation:
+      enabled: false             # no Single Step Instrumentation: each image already loads its tracer
+  dogstatsd:
+    useHostPort: true            # 8125: tracer runtime metrics
+  otlp:
+    receiver:
+      protocols:
+        http:
+          enabled: true          # 0.0.0.0:4318, hostPort
+    logs:
+      enabled: false             # logs come from container stdout, not OTLP (no duplicates)
+  processAgent:
+    enabled: true
+    processCollection: true      # live processes
+  kubeStateMetricsCore:
+    enabled: true
+  orchestratorExplorer:
+    enabled: true
+clusterAgent:
+  enabled: true
+  admissionController:
+    enabled: false               # DD_AGENT_HOST, DD_ENV ... are set in k8s/tuktukpay.yaml; nothing to inject

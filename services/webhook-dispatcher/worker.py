@@ -3,10 +3,10 @@ merchants' webhook endpoints (Python).
 
 Consumes the `payments.events` Redis stream written by checkout-api. The
 producer put the W3C `traceparent` inside the message, so the worker continues
-the SAME trace: in Splunk APM one payment trace spans the synchronous API call
+the SAME trace: in Datadog APM one payment trace spans the synchronous API call
 AND the asynchronous webhook delivery (with retries) seconds later.
 
-Run with `opentelemetry-instrument python worker.py` (Splunk distro). Redis and
+Run with `ddtrace-run python worker.py` (Datadog tracer). Redis and
 httpx calls are auto-instrumented; the consumer span is created by hand because
 stream consumption has no framework hook.
 """

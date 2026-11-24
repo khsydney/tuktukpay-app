@@ -1,74 +1,67 @@
-# TukTukPay — "11.11 War Room" workshop stack
+# TukTukPay — "11.11 War Room" workshop stack, Datadog edition (branch tuktukpay-app-with-DD)
 #
-#   cp .env.example .env      # add your Splunk realm + access token
+#   cp .env.example .env      # add DD_API_KEY (and DD_SITE if not datadoghq.com)
 #   docker compose up -d --build
 #   open http://localhost:8090   (chaos controls)
 #
-# Swap the Node.js ledger for the .NET one:
-#   docker compose -f docker-compose.yml -f docker-compose.dotnet.yml up -d --build
-# Dual-ship to Datadog while evaluating (migration story):
-#   docker compose -f docker-compose.yml -f docker-compose.dualship.yml up -d
+# Every service runs its Datadog tracer (ddtrace-run, dd-trace, dd-java-agent, dd-trace-go) and
+# sends to the datadog-agent container: traces on 8126, OpenTelemetry metrics on 4318 (OTLP/HTTP),
+# container stdout logs through the Docker socket.
 
 name: tuktukpay-workshop   # fixes image names (tuktukpay-workshop-<service>) whatever the folder is called
 
-x-otel-env: &otel-env
-  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+x-dd-env: &dd-env
+  DD_AGENT_HOST: datadog-agent
+  DD_ENV: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+  DD_VERSION: ${SERVICE_VERSION:-2026.09.1}
+  DD_TRACE_OTEL_ENABLED: "true"        # the services' opentelemetry API calls become Datadog spans
+  DD_METRICS_OTEL_ENABLED: "true"      # tuktukpay.* metrics (OpenTelemetry API) -> OTLP -> Datadog Agent
+  DD_LOGS_INJECTION: "true"
+  DD_RUNTIME_METRICS_ENABLED: "true"
+  DD_PROFILING_ENABLED: ${DD_PROFILING_ENABLED:-true}
+  DD_TRACE_PROPAGATION_STYLE: datadog,tracecontext,baggage
+  DD_TRACE_SAMPLING_RULES: '[{"resource":"GET /healthz","sample_rate":0}]'
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://datadog-agent:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
   OTEL_RESOURCE_ATTRIBUTES: deployment.environment=${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01},service.namespace=tuktukpay,service.version=${SERVICE_VERSION:-2026.09.1}
   OTEL_PROPAGATORS: tracecontext,baggage
   CHAOS_URL: http://chaos-controller:8090
 
-x-python-otel-env: &python-otel-env
-  <<: *otel-env
-  # Logs: the Splunk Python distro attaches an OTLP LoggingHandler to the root logger
-  # (OTEL_LOGS_EXPORTER=otlp is its default); tuktuk_logging.py adds the JSON stdout
-  # line with trace_id/span_id, so the distro's own text correlation format is off.
-  OTEL_LOGS_EXPORTER: otlp
-  OTEL_PYTHON_LOG_CORRELATION: "false"
-  OTEL_PYTHON_LOG_LEVEL: info
+x-python-dd-env: &python-dd-env
+  <<: *dd-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  OTEL_PYTHON_URLLIB_EXCLUDED_URLS: chaos-controller
-  OTEL_PYTHON_EXCLUDED_URLS: healthz
-  SPLUNK_PROFILER_ENABLED: "true"   # AlwaysOn Profiling (CPU) for Python
 
-x-node-otel-env: &node-otel-env
-  <<: *otel-env
-  SPLUNK_PROFILER_ENABLED: "true"
-  SPLUNK_PROFILER_MEMORY_ENABLED: "true"
-  SPLUNK_RUNTIME_METRICS_ENABLED: "true"
-  OTEL_METRICS_EXPORTER: otlp
-  # Logs: @splunk/otel starts an OTLP LoggerProvider when SPLUNK_AUTOMATIC_LOG_COLLECTION
-  # is on; pino records (log.js) are sent with trace_id/span_id injected. Its log
-  # exporter speaks OTLP/HTTP, so point it at the collector's 4318 port explicitly.
-  SPLUNK_AUTOMATIC_LOG_COLLECTION: "true"
-  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
+x-node-dd-env: &node-dd-env
+  <<: *dd-env
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
 services:
   # ---------------------------------------------------------------- telemetry
-  otel-collector:
-    image: quay.io/signalfx/splunk-otel-collector:latest
-    container_name: otel-collector
-    user: "0:0"            # read /var/run/docker.sock for the docker_stats receiver (Docker Desktop)
-    command: ["--config=/etc/otel/collector-config.yaml"]
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7.86.0
+    container_name: datadog-agent
     environment:
-      SPLUNK_ACCESS_TOKEN: ${SPLUNK_ACCESS_TOKEN:?set SPLUNK_ACCESS_TOKEN in .env}
-      SPLUNK_REALM: ${SPLUNK_REALM:?set SPLUNK_REALM in .env}
-      SPLUNK_MEMORY_TOTAL_MIB: "512"
-      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
-      # Logs -> Splunk Cloud Platform HEC (Log Observer Connect). See docs/logs-setup.md.
-      # Fallback: the O11y ingest endpoint (needs the Observability Logs entitlement).
-      SPLUNK_HEC_URL: ${SPLUNK_HEC_URL:-https://ingest.${SPLUNK_REALM}.observability.splunkcloud.com/v1/log}
-      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-${SPLUNK_ACCESS_TOKEN}}
-      SPLUNK_HEC_INDEX: ${SPLUNK_HEC_INDEX:-}
+      DD_API_KEY: ${DD_API_KEY:?set DD_API_KEY in .env}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      DD_ENV: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      DD_HOSTNAME: tuktukpay-compose
+      DD_APM_ENABLED: "true"
+      DD_APM_NON_LOCAL_TRAFFIC: "true"
+      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "true"
+      DD_CONTAINER_EXCLUDE_LOGS: "name:datadog-agent"
+      DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT: 0.0.0.0:4318
+      DD_PROCESS_CONFIG_PROCESS_COLLECTION_ENABLED: "true"
     volumes:
-      - ./otel/collector-config.yaml:/etc/otel/collector-config.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "13133:13133" # health
-      - "55679:55679" # zpages
+      - "8126:8126"     # APM traces
+      - "8125:8125/udp" # DogStatsD
+      - "4318:4318"     # OTLP/HTTP (OpenTelemetry metrics)
     restart: unless-stopped
 
   # ---------------------------------------------------------------- data stores
@@ -107,13 +100,18 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------- payment platform
-  checkout-api:            # Go — public payments API (manual OTel SDK)
+  checkout-api:            # Go — public payments API (OpenTelemetry API on dd-trace-go)
     build: ./services/checkout-api
     container_name: checkout-api
+    labels:
+      com.datadoghq.tags.service: checkout-api
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *otel-env
+      <<: *dd-env
       OTEL_SERVICE_NAME: checkout-api
-      LOG_LEVEL: ${LOG_LEVEL:-info}   # slog level; logs go to stdout (JSON) and OTLP (otelslog bridge)
+      DD_SERVICE: checkout-api
+      LOG_LEVEL: ${LOG_LEVEL:-info}   # slog level; logs go to stdout (JSON), collected by the Datadog Agent
       PORT: "8080"
       RISK_URL: http://risk-engine:8081
       ROUTER_URL: http://payment-router:8082
@@ -125,34 +123,37 @@ services:
       - "8080:8080"
     depends_on:
       redis: { condition: service_healthy }
-      otel-collector: { condition: service_started }
+      datadog-agent: { condition: service_started }
     restart: unless-stopped
 
-  risk-engine:             # Python — fraud/risk scoring (zero-code Splunk distro)
+  risk-engine:             # Python — fraud/risk scoring (ddtrace-run)
     build: ./services/risk-engine
     container_name: risk-engine
+    labels:
+      com.datadoghq.tags.service: risk-engine
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: risk-engine
+      DD_SERVICE: risk-engine
     ports:
       - "8081:8081"
     restart: unless-stopped
 
-  payment-router:          # Java 21 — acquirer routing + failover (zero-code Java agent)
+  payment-router:          # Java 21 — acquirer routing + failover (dd-java-agent)
     build: ./services/payment-router
     container_name: payment-router
+    labels:
+      com.datadoghq.tags.service: payment-router
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *otel-env
+      <<: *dd-env
       OTEL_SERVICE_NAME: payment-router
-      JAVA_TOOL_OPTIONS: -javaagent:/otel/splunk-otel-javaagent.jar
-      SPLUNK_PROFILER_ENABLED: "true"
-      SPLUNK_PROFILER_MEMORY_ENABLED: "true"
-      # Logs: Log.java emits structured records through the OpenTelemetry Logs API, which
-      # the Java agent bridges to its SDK and exports with trace context (OTLP). JUL
-      # records (startup, uncaught errors) are captured by the agent as well.
-      OTEL_LOGS_EXPORTER: otlp
+      DD_SERVICE: payment-router
+      JAVA_TOOL_OPTIONS: -javaagent:/dd/dd-java-agent.jar -Ddd.trace.otel.enabled=true
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_RESPONSE_HEADERS: x-payment-acquirer,x-route-attempts,x-route-failover,x-route-outcome,x-payment-card-bin
       ACQUIRER_URL: http://acquirer-sim:8083
       ACQUIRER_TIMEOUT_MS: "2500"
       PORT: "8082"
@@ -163,9 +164,14 @@ services:
   acquirer-sim:            # Node.js — simulated acquirers & wallet rails (zero-code)
     build: ./services/acquirer-sim
     container_name: acquirer-sim
+    labels:
+      com.datadoghq.tags.service: acquirer-sim
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *node-otel-env
+      <<: *node-dd-env
       OTEL_SERVICE_NAME: acquirer-sim
+      DD_SERVICE: acquirer-sim
       PORT: "8083"
     ports:
       - "8083:8083"
@@ -174,9 +180,14 @@ services:
   ledger:                  # Node.js + PostgreSQL — system of record (zero-code). .NET variant: docker-compose.dotnet.yml
     build: ./services/ledger
     container_name: ledger
+    labels:
+      com.datadoghq.tags.service: ledger
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *node-otel-env
+      <<: *node-dd-env
       OTEL_SERVICE_NAME: ledger
+      DD_SERVICE: ledger
       PORT: "8084"
       DATABASE_URL: postgres://tuktukpay:tuktukpay@postgres:5432/tuktukpay
       PG_POOL_SIZE: "10"
@@ -189,10 +200,15 @@ services:
   webhook-dispatcher:      # Python worker — async merchant webhooks via Redis Streams
     build: ./services/webhook-dispatcher
     container_name: webhook-dispatcher
-    command: ["opentelemetry-instrument", "python", "worker.py"]
+    labels:
+      com.datadoghq.tags.service: webhook-dispatcher
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
+    command: ["ddtrace-run", "python", "worker.py"]
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: webhook-dispatcher
+      DD_SERVICE: webhook-dispatcher
       REDIS_URL: redis://redis:6379/0
       MERCHANT_SIM_URL: http://merchant-sim:8085
     depends_on:
@@ -202,10 +218,15 @@ services:
   merchant-sim:            # Python — merchants' webhook endpoints
     build: ./services/webhook-dispatcher
     container_name: merchant-sim
-    command: ["opentelemetry-instrument", "uvicorn", "merchant_sim:app", "--host", "0.0.0.0", "--port", "8085", "--no-access-log"]
+    labels:
+      com.datadoghq.tags.service: merchant-sim
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
+    command: ["ddtrace-run", "uvicorn", "merchant_sim:app", "--host", "0.0.0.0", "--port", "8085", "--no-access-log"]
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: merchant-sim
+      DD_SERVICE: merchant-sim
     ports:
       - "8085:8085"
     restart: unless-stopped
@@ -213,9 +234,14 @@ services:
   merchant-copilot:        # Python — LLM agent (GenAI semantic conventions)
     build: ./services/merchant-copilot
     container_name: merchant-copilot
+    labels:
+      com.datadoghq.tags.service: merchant-copilot
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: merchant-copilot
+      DD_SERVICE: merchant-copilot
       LEDGER_URL: http://ledger:8084
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-mock}
       COPILOT_MODEL: ${COPILOT_MODEL:-}
@@ -234,10 +260,15 @@ services:
   wallet-sim:              # Python — consumer wallet: AMP task mandates + Know-Your-Agent registry
     build: ./services/agent-console
     container_name: wallet-sim
-    command: ["opentelemetry-instrument", "uvicorn", "wallet_sim:app", "--host", "0.0.0.0", "--port", "8088", "--no-access-log"]
+    labels:
+      com.datadoghq.tags.service: wallet-sim
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
+    command: ["ddtrace-run", "uvicorn", "wallet_sim:app", "--host", "0.0.0.0", "--port", "8088", "--no-access-log"]
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: wallet-sim
+      DD_SERVICE: wallet-sim
       AMP_SHARED_SECRET: ${AMP_SHARED_SECRET:-tuktukpay-amp-demo-secret}
     ports:
       - "8088:8088"
@@ -246,13 +277,18 @@ services:
   shopping-agent:          # Python — AI shopping agent + Agentic Checkout Console (http://localhost:8087)
     build: ./services/agent-console
     container_name: shopping-agent
+    labels:
+      com.datadoghq.tags.service: shopping-agent
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: shopping-agent
+      DD_SERVICE: shopping-agent
       CHECKOUT_URL: http://checkout-api:8080
       WALLET_URL: http://wallet-sim:8088
       MERCHANT_SIM_URL: http://merchant-sim:8085
-      CONSOLE_SPLUNK_REALM: ${SPLUNK_REALM}   # for 'open trace in Splunk' links only
+      CONSOLE_DD_SITE: ${DD_SITE:-datadoghq.com}   # for 'open trace in Datadog' links only
       AMP_SHARED_SECRET: ${AMP_SHARED_SECRET:-tuktukpay-amp-demo-secret}
       AGENT_PROVIDER: ${AGENT_PROVIDER:-mock}
       AGENT_MODEL: ${AGENT_MODEL:-}
@@ -274,9 +310,14 @@ services:
   loadgen:                 # Python — merchants' storefronts calling the API + asking the copilot
     build: ./services/loadgen
     container_name: merchant-storefront
+    labels:
+      com.datadoghq.tags.service: merchant-storefront
+      com.datadoghq.tags.env: ${DEPLOYMENT_ENVIRONMENT:-tuktukpay-team01}
+      com.datadoghq.tags.version: ${SERVICE_VERSION:-2026.09.1}
     environment:
-      <<: *python-otel-env
+      <<: *python-dd-env
       OTEL_SERVICE_NAME: merchant-storefront
+      DD_SERVICE: merchant-storefront
       CHECKOUT_URL: http://checkout-api:8080
       COPILOT_URL: http://merchant-copilot:8086
       BASE_RPS: ${BASE_RPS:-4}

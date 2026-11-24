@@ -1,12 +1,10 @@
 # TukTukPay log schema
 
-Every service emits the same kind of log record, in two places at once:
-
-* **stdout** — one JSON object per line, for `docker compose logs` and Kubernetes.
-* **OTLP** — the same record through the OpenTelemetry Logs SDK of each runtime, with the active span's
-  `trace_id`/`span_id` and the service resource attached. The collector forwards it to Splunk Cloud Platform
-  over HEC ([setup](logs-setup.md)), where Log Observer Connect, Related Content, the AI Assistant and the
-  AI Troubleshooting Agent read it.
+Every service emits the same kind of log record: **one JSON object per line on stdout**. The Datadog Agent collects
+container stdout (Kubernetes: `logs.containerCollectAll`; Compose: the Docker socket), parses the JSON and tags each
+line with the pod's or container's `env`, `service` and `version`. Inside a span the line also carries
+`dd.trace_id` / `dd.span_id` (decimal, lower 64 bits of the trace id) next to the OpenTelemetry-style `trace_id` /
+`span_id`, so Datadog links it to the trace — the trace's **Logs** tab and Bits AI SRE both read it.
 
 The design goal is that a reader — a person in a war room or an AI root-cause analysis — can go from an alert
 to the cause with the log lines alone: every line names the payment, the merchant, the dependency that misbehaved,
@@ -17,11 +15,11 @@ how long it took and why. The "smoking gun" line of every storyline act is liste
 | Part | Content |
 |---|---|
 | body / `message` | One human-readable sentence with the key identifiers inline: `acquirer acq-kbank timed out after 2504 ms for payment pay_6f7f… (merchant lazada-th, BIN 457173 THB); failing over to acq-uob` |
-| severity | `DEBUG` (not exported by default), `INFO`, `WARN`, `ERROR`. The collector adds a lowercase `severity` field (`info`, `warn`, `error`…) because that is the key Log Observer Connect recognises. |
+| severity | `level`: `DEBUG` (off by default), `INFO`, `WARN`, `ERROR` (Python and Java write `WARNING`/`WARN` as their runtime names them). |
 | `event` | Dotted event name, the primary search key: `payment.declined`, `acquirer.timeout`, `db.pool.wait`, `config.changed` … |
-| resource | `service.name`, `deployment.environment`, `service.version`, `host.name` — set by the SDK from `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES`, the names Related Content and the Troubleshooting Agent need. |
-| trace context | `trace_id`, `span_id` — from the active span; empty for background work (pollers, startup). |
-| business keys | Same names as the span attributes, so Tag Spotlight and logs agree: `payment.id`, `merchant.id`, `order.id`, `payment.amount`, `payment.currency`, `payment.method`, `payment.channel`, `payment.initiator`, `payment.card.bin`, `payment.card.network`, `payment.wallet.provider`, `payment.acquirer`, `payment.outcome`, `payment.decline_reason`, `acquirer.response_code`, `route.attempts`, `route.failover`, `route.attempt_summary`, `risk.model_version`, `risk.score`, `risk.decision`, `risk.reasons`, `agent.id`, `agent.protocol`, `mandate.verdict`, `mandate.block_reason`, `amp.task_id`, `amp.kya.rating`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.tool.names`, `guardrail.verdict`, `guardrail.rules`, `webhook.attempt`, `db.pool.max`, `db.pool.waiting`, `db.pool.wait_ms` |
+| resource | `service.name`, `deployment.environment` in the line; the Datadog Agent adds `service`, `env`, `version` from the pod labels `tags.datadoghq.com/*` (Compose: container labels `com.datadoghq.tags.*`). |
+| trace context | `trace_id`, `span_id` (OpenTelemetry hex) and `dd.trace_id`, `dd.span_id` (Datadog decimal) — from the active span; absent for background work (pollers, startup). |
+| business keys | Same names as the span attributes, so APM facets and log facets agree: `payment.id`, `merchant.id`, `order.id`, `payment.amount`, `payment.currency`, `payment.method`, `payment.channel`, `payment.initiator`, `payment.card.bin`, `payment.card.network`, `payment.wallet.provider`, `payment.acquirer`, `payment.outcome`, `payment.decline_reason`, `acquirer.response_code`, `route.attempts`, `route.failover`, `route.attempt_summary`, `risk.model_version`, `risk.score`, `risk.decision`, `risk.reasons`, `agent.id`, `agent.protocol`, `mandate.verdict`, `mandate.block_reason`, `amp.task_id`, `amp.kya.rating`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.tool.names`, `guardrail.verdict`, `guardrail.rules`, `webhook.attempt`, `db.pool.max`, `db.pool.waiting`, `db.pool.wait_ms` |
 | operational keys | `duration_ms`, `peer.service` (the dependency involved: `risk-engine`, `payment-router`, `ledger`, `wallet-sim`, `postgres`, `redis`, an acquirer name…), `http.response.status_code`, `error.type`, `error.message`, `exception.type`, `exception.stacktrace` |
 | config changes | `event=config.changed` with `feature_flag.name`, `feature_flag.enabled`, `feature_flag.params` — logged by the service that consumes a flag when the chaos panel flips it. In a real platform this is the deploy / feature-flag / config-change entry that root-cause analysis looks for first. |
 
@@ -39,8 +37,8 @@ A stdout line from checkout-api:
  "http.response.status_code":403,"duration_ms":4,"trace_id":"7d8539cb3eb5c7f9924fc32b7ce43bc7","span_id":"d7812b3f7341b236"}
 ```
 
-In Splunk the same record is one event: the body is `_raw`, every key above is an indexed field (`source` is the
-service name, `sourcetype=otel`, `index=tuktukpay`).
+In Datadog every key is a log attribute; query it as a facet with `@`, e.g. `@event:acquirer.timeout`,
+`@payment.acquirer:acq-kbank`. `service`, `env` and `version` come from the Agent's tags.
 
 ## Event catalogue
 
@@ -161,36 +159,30 @@ act a line is evidence for; **bold** events are the smoking gun of that act.
 | `storefront.paused` | I | traffic paused from the war-room panel | |
 | `config.changed` | I | `festival_spike`, `agent_traffic_surge`, `agent_mandate_violations`, `copilot_prompt_injection`, `traffic_paused` flipped | `feature_flag.params` (`multiplier`, `agent_share`, `rate`…) |
 
-## Search cheat sheet (Splunk Cloud Platform / Log Observer Connect)
+## Search cheat sheet (Datadog Log Explorer)
 
 ```
-index=tuktukpay deployment.environment=tuktukpay-team01 severity IN (warn, error) | stats count by source, event
-index=tuktukpay event=acquirer.timeout | stats count by payment.acquirer, payment.card.bin, route.backup_acquirer          # Act 1
-index=tuktukpay event=config.changed | table _time source feature_flag.name feature_flag.enabled feature_flag.params        # what changed, when
-index=tuktukpay event=risk.canary_inference | timechart avg(risk.inference_ms) by risk.model_version                       # Act 2
-index=tuktukpay event IN (copilot.tool_loop_suspected, guardrail.action_blocked, guardrail.prompt_injection_suspected)      # Act 3
-index=tuktukpay event=mandate.blocked | stats count by mandate.block_reason, agent.id                                       # Act 4
-index=tuktukpay event IN (kya.registry_unavailable, mandate.blocked) mandate.block_reason=mandate_kya_unavailable            # Act 4b
-index=tuktukpay event IN (db.pool.wait, ledger.write_slow, merchant.webhook_error, webhook.dead_lettered)                    # Act 5
-index=tuktukpay trace_id=<id from APM>                                                                                      # one trace, all services
+env:tuktukpay-team01 status:(warn OR error)                                   # then group by service, @event
+@event:acquirer.timeout                                                       # Act 1 — group by @payment.acquirer, @payment.card.bin
+@event:config.changed                                                         # what changed, when (@feature_flag.name, @feature_flag.enabled)
+@event:risk.canary_inference                                                  # Act 2 — avg of @risk.inference_ms by @risk.model_version
+@event:(copilot.tool_loop_suspected OR guardrail.action_blocked OR guardrail.prompt_injection_suspected)   # Act 3
+@event:mandate.blocked                                                        # Act 4 — group by @mandate.block_reason, @agent.id
+@event:(kya.registry_unavailable OR mandate.blocked) @mandate.block_reason:mandate_kya_unavailable        # Act 4b
+@event:(db.pool.wait OR ledger.write_slow OR merchant.webhook_error OR webhook.dead_lettered)              # Act 5
+trace_id:<id>                                                                 # one trace, all services (or open the trace's Logs tab)
 ```
+
+The level is the `level` attribute (`INFO`, `WARN`, `ERROR`); add a status remapper on `level` in the log pipeline if
+you want Datadog's `status` to follow it.
 
 ## How each runtime emits logs
 
 | Runtime | Mechanism | Where |
 |---|---|---|
-| Python (risk-engine, webhook-dispatcher, merchant-sim, merchant-copilot, shopping-agent, wallet-sim, loadgen) | `tuktuk_logging.py` (copied into each service): a JSON stdout formatter that adds trace ids from the active span, `log_event(logger, level, event, message, **fields)` which passes the fields as `extra=` so the Splunk Python distro's OTLP `LoggingHandler` exports them as attributes. The distro enables logs export by default (`OTEL_LOGS_EXPORTER=otlp`); the SDK's own diagnostics (`opentelemetry.*` loggers) are filtered out of the export. | `services/*/tuktuk_logging.py` |
-| Go (checkout-api) | `logging.go`: a `slog` fan-out handler — `JSONHandler` on stdout (with `trace_id`/`span_id` copied from the context) plus the `otelslog` bridge into an OTLP `LoggerProvider` created in `otel.go`. Business fields reuse the span attributes (`kvToSlog`). | `services/checkout-api/logging.go`, `otel.go` |
-| Java (payment-router) | `Log.java`: writes the JSON line and emits the record through the OpenTelemetry **Logs API** (`GlobalOpenTelemetry.get().getLogsBridge()`); the Splunk Java agent bridges it to its SDK and exports it with the span context. The only compile-time dependency is `opentelemetry-api` (fetched in the Dockerfile). `OTEL_LOGS_EXPORTER=otlp` also exports the few `java.util.logging` lines. | `services/payment-router/src/main/java/com/tuktukpay/router/Log.java` |
-| Node.js (acquirer-sim, ledger) | `log.js`: pino to stdout. `@splunk/otel` injects `trace_id`/`span_id` into every pino record and, with `SPLUNK_AUTOMATIC_LOG_COLLECTION=true`, exports the records over OTLP/HTTP — hence `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs`. | `services/acquirer-sim/log.js`, `services/ledger/log.js` |
-| .NET (ledger-dotnet) | `ILogger` message templates whose placeholders are the field names (`{payment.id}`), JSON console output with `TraceId`/`SpanId` scopes; the Splunk .NET auto-instrumentation exports every `ILogger` record over OTLP (`OTEL_DOTNET_AUTO_LOGS_ENABLED`, on by default). | `services/ledger-dotnet/Program.cs` |
+| Python (risk-engine, webhook-dispatcher, merchant-sim, merchant-copilot, shopping-agent, wallet-sim, loadgen) | `tuktuk_logging.py` (copied into each service): a JSON stdout formatter that adds `trace_id`/`span_id` and `dd.trace_id`/`dd.span_id`/`dd.service`/`dd.env`/`dd.version` from the active span; `log_event(logger, level, event, message, **fields)` passes the fields as `extra=`, which become JSON keys. `ddtrace-run` also injects its own `dd.*` attributes (`DD_LOGS_INJECTION`); when it does, its values win. | `services/*/tuktuk_logging.py` |
+| Go (checkout-api) | `logging.go`: a `slog` `JSONHandler` on stdout; `traceHandler` adds `trace_id`/`span_id` and `dd.trace_id`/`dd.span_id` from the context, the handler attributes add `dd.service`/`dd.env`/`dd.version`. Business fields reuse the span attributes (`kvToSlog`). | `services/checkout-api/logging.go` |
+| Java (payment-router) | `Log.java`: writes the JSON line with the span ids and the `dd.*` fields. It also calls the OpenTelemetry Logs API, which stays a no-op unless `DD_LOGS_OTEL_ENABLED=true` (leave it off, or every line arrives twice). | `services/payment-router/src/main/java/com/tuktukpay/router/Log.java` |
+| Node.js (acquirer-sim, ledger) | `log.js`: pino to stdout; `dd-trace` injects `dd.trace_id`, `dd.span_id`, `dd.service`, `dd.env`, `dd.version` into every record (`DD_LOGS_INJECTION=true`). | `services/acquirer-sim/log.js`, `services/ledger/log.js` |
 
 `LOG_LEVEL` (per service, default `INFO`) gates both outputs; `DEBUG` adds the per-request healthy events.
-
-## What the collector does with a log record
-
-`otel/collector-config.yaml`, pipeline `logs`:
-
-1. `memory_limiter`, `resourcedetection`, `resource/add_environment` — same as traces; `deployment.environment` is upserted so every record carries the team's environment.
-2. `transform/logs` — copies `service.name` into `com.splunk.source` so the Splunk `source` field is the service name (while `service.name` stays an indexed field for Related Content), and derives the lowercase `severity` field Log Observer Connect understands from the OTel severity text (`WARNING`→`warn`, `SEVERE`→`error`, `Information`→`info`…) or, when an SDK sets only the severity number (Go's `otelslog` bridge), from the number (9–12 → `info`, 13–16 → `warn`, 17–20 → `error`).
-3. `splunk_hec` — one HEC event per record: body → `event`, `trace_id`, `span_id`, `otel.log.severity.text` and **every resource and log attribute** → indexed `fields`; `host.name` → `host`; `index` from `SPLUNK_HEC_INDEX`. A failing endpoint gives up after two minutes and keeps the queue small, so logs can never back up into the memory limiter and cost you traces.

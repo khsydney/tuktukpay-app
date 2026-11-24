@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # The workshop on EKS (Amazon Elastic Kubernetes Service), the counterpart of kind-up.sh:
-# cluster (k8s/eks-cluster.yaml) + ECR (Elastic Container Registry) images + Splunk OTel Collector chart
+# cluster (k8s/eks-cluster.yaml) + ECR (Elastic Container Registry) images + the Datadog Agent (Helm)
 # + the TukTukPay stack, with the war-room panel and the agent console behind load balancers that only
 # accept your current public IP. Safe to re-run: it creates what is missing and rolls out changed images.
 #
 # Requirements: docker, eksctl, kubectl, helm, aws CLI. Set EKS_AWS_ACCOUNT (and EKS_AWS_PROFILE if not
-# the default profile) in ../.env. Reads SPLUNK_* and
+# the default profile) in ../.env. Reads DD_API_KEY, DD_SITE and
 # DEPLOYMENT_ENVIRONMENT from ../.env (same as kind). Stop the kind cluster first if both would
 # report the same environment (docker stop tuktukpay-control-plane).
 #   k8s/eks-up.sh            # or: make eks-up
@@ -21,8 +21,7 @@ ACCOUNT=${EKS_AWS_ACCOUNT:?set EKS_AWS_ACCOUNT (your 12-digit AWS account ID) in
 CONTEXT=$CLUSTER
 : "${NAMESPACE:=tuktukpay}"
 : "${DEPLOYMENT_ENVIRONMENT:=tuktukpay-k8s}"
-: "${SPLUNK_REALM:?set SPLUNK_REALM in .env}"
-: "${SPLUNK_ACCESS_TOKEN:?set SPLUNK_ACCESS_TOKEN in .env}"
+: "${DD_API_KEY:?set DD_API_KEY in .env (Datadog > Organization Settings > API Keys)}"
 SERVICES="chaos-controller checkout-api risk-engine payment-router acquirer-sim ledger webhook-dispatcher merchant-copilot wallet-sim loadgen"
 REGISTRY=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
 K="kubectl --context $CONTEXT"
@@ -40,7 +39,7 @@ echo "== kube-context $CONTEXT (kind stays the current context; use --context $C
 
 NAT_IP=$(aws ec2 describe-nat-gateways --filter "Name=tag:alpha.eksctl.io/cluster-name,Values=$CLUSTER" "Name=state,Values=available" \
   --query 'NatGateways[0].NatGatewayAddresses[0].PublicIp' --output text)
-echo "== cluster egress IP: $NAT_IP — must be on Splunk Cloud: Settings > Server settings > IP allow list > HEC access for ingestion"
+echo "== cluster egress IP: $NAT_IP (all outbound traffic, including to Datadog, leaves from here)"
 
 echo "== ECR repositories + image push"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
@@ -58,25 +57,9 @@ for s in $SERVICES; do
   echo "   $s ${after:7:12}"
 done
 
-echo "== Splunk OTel Collector chart + OpenTelemetry Operator"
-helm repo add splunk-otel-collector-chart https://signalfx.github.io/splunk-otel-collector-chart >/dev/null 2>&1 || true
-helm repo update >/dev/null
-HEC_ARGS=()
-if [ -n "${SPLUNK_HEC_URL:-}" ] && [ -n "${SPLUNK_HEC_TOKEN:-}" ]; then
-  HEC_ARGS=(--set "splunkPlatform.endpoint=$SPLUNK_HEC_URL" --set "splunkPlatform.token=$SPLUNK_HEC_TOKEN" --set "splunkPlatform.index=${SPLUNK_HEC_INDEX:-tuktukpay}")
-fi
 KUBECONFIG_EKS=""
 trap 'rm -f "$KUBECONFIG_EKS"' EXIT
-helm upgrade --install splunk-otel-collector splunk-otel-collector-chart/splunk-otel-collector \
-  --kube-context "$CONTEXT" --namespace splunk-otel --create-namespace \
-  --set splunkObservability.accessToken="$SPLUNK_ACCESS_TOKEN" \
-  --set splunkObservability.realm="$SPLUNK_REALM" \
-  --set clusterName="$CLUSTER" \
-  --set environment="$DEPLOYMENT_ENVIRONMENT" \
-  --set cloudProvider=aws --set distribution=eks \
-  ${HEC_ARGS[@]+"${HEC_ARGS[@]}"} \
-  -f "$DIR/values-splunk-otel-collector.yaml" --wait --timeout 8m
-$K -n splunk-otel wait --for=condition=available deployment -l app.kubernetes.io/name=opentelemetry-operator --timeout=180s 2>/dev/null || true
+DEPLOYMENT_ENVIRONMENT="$DEPLOYMENT_ENVIRONMENT" "$DIR/datadog-agent.sh" "$CONTEXT" "$CLUSTER" eks
 
 echo "== deploying TukTukPay ($NAMESPACE / $DEPLOYMENT_ENVIRONMENT)"
 # apply.sh uses the current context; point it at EKS for this call only.

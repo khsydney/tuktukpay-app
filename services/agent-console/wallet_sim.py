@@ -6,7 +6,7 @@ Two jobs:
   * Task mandate issuance:     POST /v1/mandates        -> a scoped, time-boxed task token for a
                                                          registered agent, tied to a customer + wallet
 
-Auto-instrumented with the Splunk distro. The `kya_registry_down` chaos flag makes the
+Auto-instrumented by ddtrace-run. The `kya_registry_down` chaos flag makes the
 KYA lookup fail (503) so TukTukPay's checkout has to fail closed: an "AI governance
 dependency" incident for the troubleshooting acts.
 """

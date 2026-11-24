@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# One-command local Kubernetes for the workshop (no EKS needed): kind cluster + Splunk OTel Collector
-# Helm chart with the OpenTelemetry Operator + the TukTukPay stack, instrumented by pod annotations.
+# One-command local Kubernetes for the workshop (no EKS needed): kind cluster + the Datadog Agent
+# (Helm, k8s/datadog-agent.sh) + the TukTukPay stack, each service started under its Datadog tracer.
 #
-# Requirements: docker, kind, kubectl, helm. Reads SPLUNK_REALM / SPLUNK_ACCESS_TOKEN from ../.env.
+# Requirements: docker, kind, kubectl, helm. Reads DD_API_KEY / DD_SITE from ../.env.
 #   k8s/kind-up.sh                      # cluster "tuktukpay", namespace tuktukpay, environment tuktukpay-k8s
 #   NAMESPACE=tuktukpay-team01 DEPLOYMENT_ENVIRONMENT=tuktukpay-team01 k8s/kind-up.sh   # per-team namespace on the same cluster
 set -euo pipefail
@@ -12,8 +12,7 @@ CLUSTER=${CLUSTER:-tuktukpay}
 : "${NAMESPACE:=tuktukpay}"
 : "${DEPLOYMENT_ENVIRONMENT:=tuktukpay-k8s}"
 [ -f "$ROOT/.env" ] && set -a && . "$ROOT/.env" && set +a
-: "${SPLUNK_REALM:?set SPLUNK_REALM in .env}"
-: "${SPLUNK_ACCESS_TOKEN:?set SPLUNK_ACCESS_TOKEN in .env}"
+: "${DD_API_KEY:?set DD_API_KEY in .env (Datadog > Organization Settings > API Keys)}"
 
 SERVICES="chaos-controller checkout-api risk-engine payment-router acquirer-sim ledger webhook-dispatcher merchant-copilot wallet-sim loadgen"
 
@@ -50,32 +49,7 @@ for s in $SERVICES; do
   if [ -n "$before" ] && [ "$before" != "$after" ]; then CHANGED="$CHANGED $s"; fi
 done
 
-echo "== installing the Splunk OTel Collector chart + OpenTelemetry Operator"
-helm repo add splunk-otel-collector-chart https://signalfx.github.io/splunk-otel-collector-chart >/dev/null 2>&1 || true
-helm repo update >/dev/null
-# Logs -> Splunk Cloud Platform HEC (Log Observer Connect), same variables as Docker Compose (docs/logs-setup.md).
-HEC_ARGS=()
-if [ -n "${SPLUNK_HEC_URL:-}" ] && [ -n "${SPLUNK_HEC_TOKEN:-}" ]; then
-  HEC_ARGS=(--set "splunkPlatform.endpoint=$SPLUNK_HEC_URL" --set "splunkPlatform.token=$SPLUNK_HEC_TOKEN" --set "splunkPlatform.index=${SPLUNK_HEC_INDEX:-tuktukpay}")
-  echo "   logs -> $SPLUNK_HEC_URL (index ${SPLUNK_HEC_INDEX:-tuktukpay})"
-  # An IP not on the stack's "HEC access for ingestion" allow list just times out (no 403) and the
-  # collector drops logs silently; a new network means a new public IP (docs/logs-setup.md 1.3).
-  if ! curl -s -o /dev/null -m 8 "${SPLUNK_HEC_URL%/services/collector*}/services/collector/health"; then
-    echo "   WARNING: HEC not reachable from this network. Add $(curl -4 -s -m 5 https://api.ipify.org || echo 'your public IP')/32 to"
-    echo "            Splunk Cloud: Settings > Server settings > IP allow list > HEC access for ingestion"
-  fi
-else
-  echo "   SPLUNK_HEC_URL/SPLUNK_HEC_TOKEN not set: logs stay in kubectl logs only"
-fi
-helm upgrade --install splunk-otel-collector splunk-otel-collector-chart/splunk-otel-collector \
-  --namespace splunk-otel --create-namespace \
-  --set splunkObservability.accessToken="$SPLUNK_ACCESS_TOKEN" \
-  --set splunkObservability.realm="$SPLUNK_REALM" \
-  --set clusterName="kind-$CLUSTER" \
-  --set environment="$DEPLOYMENT_ENVIRONMENT" \
-  "${HEC_ARGS[@]}" \
-  -f "$DIR/values-splunk-otel-collector.yaml" --wait --timeout 5m
-kubectl -n splunk-otel wait --for=condition=available deployment -l app.kubernetes.io/name=opentelemetry-operator --timeout=180s 2>/dev/null || true
+DEPLOYMENT_ENVIRONMENT="$DEPLOYMENT_ENVIRONMENT" "$DIR/datadog-agent.sh" "kind-$CLUSTER" "kind-$CLUSTER" kind
 
 echo "== deploying TukTukPay ($NAMESPACE / $DEPLOYMENT_ENVIRONMENT)"
 IMAGE_REGISTRY=tuktukpay-workshop NAMESPACE="$NAMESPACE" DEPLOYMENT_ENVIRONMENT="$DEPLOYMENT_ENVIRONMENT" "$DIR/apply.sh"
@@ -96,4 +70,5 @@ echo "              (other clusters without the kind port mappings: k8s/port-for
 echo "smoke test:   scripts/smoke-test.sh"
 echo "K8s acts:     act6 / act7 from the panel; k8s/acts/oversize-rollout.sh, k8s/acts/bad-image.sh, k8s/acts/rollback.sh"
 echo "tear down:    kind delete cluster --name $CLUSTER"
-echo "stay awake:   make awake — a sleeping laptop (closed lid, idle timer) freezes the whole cluster; wake = DNS blips + maybe a new VPN IP for the HEC allow list"
+echo "Datadog:      APM > Services, env:$DEPLOYMENT_ENVIRONMENT (first traces within a minute or two)"
+echo "stay awake:   make awake — a sleeping laptop (closed lid, idle timer) freezes the whole cluster"

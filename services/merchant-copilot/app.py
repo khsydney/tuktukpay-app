@@ -1,7 +1,7 @@
 """TukTukPay merchant-copilot — an LLM agent that answers merchants' questions
 ("why did payment pay_... fail?") by calling internal tools. FastAPI, Python.
 
-Auto-instrumented by the Splunk distro (HTTP in/out); GenAI spans and metrics
+Auto-instrumented by ddtrace-run (HTTP in/out); GenAI spans and metrics
 come from agent.py. Provider is selected per request or via env:
   COPILOT_PROVIDER = mock | openai | anthropic | bedrock   (default mock)
   COPILOT_MODEL    = model id for the chosen provider

@@ -2,9 +2,9 @@
 // lines (Node.js + PostgreSQL). A .NET 8 implementation of the same API lives
 // in ../ledger-dotnet for teams that want to show zero-code .NET instrumentation.
 //
-// Instrumented with ZERO code changes via `node -r @splunk/otel/instrument`.
-// The pg instrumentation records every SQL statement as a span, which is what
-// Splunk APM Database Query Performance aggregates.
+// Instrumented with ZERO code changes via `node -r ./dd-init.js` (Datadog dd-trace).
+// The pg integration records every SQL statement as a span (Datadog APM database
+// spans; Database Monitoring correlation if DBM is set up on the Postgres side).
 
 'use strict';
 

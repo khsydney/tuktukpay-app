@@ -5,5 +5,5 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY . .
 EXPOSE 8083
-# Zero-code instrumentation: the Splunk distro is preloaded with -r.
-CMD ["node", "-r", "@splunk/otel/instrument", "server.js"]
+# Datadog tracing is preloaded with -r (dd-init.js).
+CMD ["node", "-r", "./dd-init.js", "server.js"]

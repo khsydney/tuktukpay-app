@@ -3,18 +3,16 @@
 Every service logs the same way (this file is copied verbatim into each Python
 service directory, like chaos.py):
 
-  * one JSON line per event on stdout — for `docker compose logs` and Kubernetes
-  * the same record exported over OTLP by the Splunk Distribution of OpenTelemetry
-    Python: `opentelemetry-instrument` attaches an OTLP LoggingHandler to the root
-    logger (OTEL_LOGS_EXPORTER=otlp), with the active span's trace_id/span_id and the
-    resource (service.name, deployment.environment). The collector forwards it to
-    Splunk Cloud Platform over HEC, where Log Observer Connect, Related Content and
-    the AI Troubleshooting Agent read it.
+  * one JSON line per event on stdout. The Datadog Agent collects container stdout
+    (logs.containerCollectAll) and tags it with the pod's env / service / version labels.
+  * dd.trace_id / dd.span_id on every line inside a span, so Datadog links the log to the
+    APM trace. ddtrace-run also injects these (DD_LOGS_INJECTION); when it does, its values win.
 
 Conventions (docs/log-schema.md):
   event              dotted event name, e.g. payment.declined, acquirer.timeout
   business keys      payment.id, merchant.id, payment.acquirer, risk.model_version ...
-  trace_id/span_id   added automatically from the active span
+  trace_id/span_id   added automatically from the active span (OpenTelemetry hex form)
+  dd.trace_id/...    the Datadog correlation fields (decimal, lower 64 bits of the trace id)
   PCI                never a PAN or card-holder data: BIN (6 digits) + last4 only
 
 Usage:
@@ -69,6 +67,12 @@ class JsonFormatter(logging.Formatter):
         if ctx.is_valid:
             out["trace_id"] = format(ctx.trace_id, "032x")
             out["span_id"] = format(ctx.span_id, "016x")
+            # Datadog log-trace correlation: decimal ids, lower 64 bits of the trace id.
+            out["dd.trace_id"] = str(ctx.trace_id & 0xFFFFFFFFFFFFFFFF)
+            out["dd.span_id"] = str(ctx.span_id)
+        out["dd.service"] = os.getenv("DD_SERVICE", SERVICE_NAME)
+        out["dd.env"] = os.getenv("DD_ENV", DEPLOYMENT_ENVIRONMENT)
+        out["dd.version"] = os.getenv("DD_VERSION", "")
         for key, value in record.__dict__.items():
             if key not in _STANDARD_ATTRS and not key.startswith("_"):
                 out[key] = value
@@ -79,8 +83,8 @@ class JsonFormatter(logging.Formatter):
 
 
 class _ExportFilter(logging.Filter):
-    """Keep the OpenTelemetry SDK's own diagnostics (export retries, queue full...) out
-    of Splunk: they would drown the business logs during a collector hiccup."""
+    """Keep exporter diagnostics (export retries, queue full...) out of the log stream:
+    they would drown the business logs during an agent hiccup."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not record.name.startswith("opentelemetry")
@@ -91,18 +95,18 @@ def setup_logging(name: str) -> logging.Logger:
     root = logging.getLogger()
     root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     for handler in list(root.handlers):
-        if type(handler).__name__ == "LoggingHandler":  # the distro's OTLP handler: keep, but filter
+        if type(handler).__name__ == "LoggingHandler":  # an OTLP log handler, if one was attached: keep, but filter
             handler.addFilter(_ExportFilter())
-        else:  # the distro's / basicConfig text handler: replaced by JSON
+        else:  # basicConfig / ddtrace text handlers: replaced by JSON
             root.removeHandler(handler)
     stdout = logging.StreamHandler(sys.stdout)
     stdout.setFormatter(JsonFormatter())
     root.addHandler(stdout)
-    for noisy in ("httpx", "httpcore", "urllib3", "uvicorn.access", "opentelemetry"):
+    for noisy in ("httpx", "httpcore", "urllib3", "uvicorn.access", "opentelemetry", "ddtrace"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return logging.getLogger(name)
 
 
 def log_event(logger: logging.Logger, level: int, event: str, message: str, exc_info=None, **fields) -> None:
-    """Emit one structured event. `fields` become log attributes (HEC fields)."""
+    """Emit one structured event. `fields` become log attributes (Datadog log facets)."""
     logger.log(level, message, exc_info=exc_info, extra={"event": event, **fields})

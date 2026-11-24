@@ -132,9 +132,10 @@ ledger.write_slow | event.publish_failed`, each with the span's business attribu
 | `tuktukpay.payments.declines` | counter | the `count` dimensions + `payment.decline_reason` |
 | `tuktukpay.agent_mandates` | counter | `mandate.verdict`, `mandate.block_reason`, `amp.kya.rating` |
 
-**SDK setup** ([`otel.go`](otel.go)): OTLP/gRPC exporters configured from the standard `OTEL_EXPORTER_OTLP_*`
-variables, `ParentBased(AlwaysSample)`, and W3C Trace Context + Baggage propagation. The service has no
-Splunk-specific code, so the same binary can export to any OTLP backend. `tolerantTraceContext` reduces the trace
+**SDK setup** ([`otel.go`](otel.go)): the code uses the OpenTelemetry API only; `setupOTel` installs dd-trace-go's
+TracerProvider (spans go to the Datadog Agent on `DD_AGENT_HOST:8126`) and MeterProvider (OTLP/HTTP to the Agent's
+4318 when `DD_METRICS_OTEL_ENABLED=true`), the Datadog profiler when `DD_PROFILING_ENABLED=true`, and W3C Trace
+Context + Baggage propagation. Logs are stdout JSON with `dd.trace_id` / `dd.span_id` (logging.go). `tolerantTraceContext` reduces the trace
 flags of an incoming `traceparent` (for example `-03` from newer Python SDKs) to just the sampled bit. Without it,
 OTel Go older than v1.42 rejects the header and starts a new trace, which breaks the agent → checkout trace link.
 

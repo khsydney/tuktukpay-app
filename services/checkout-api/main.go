@@ -670,13 +670,12 @@ func main() {
 	}
 
 	// One otelhttp handler per route so SERVER spans get a low-cardinality name
-	// ("GET /v1/payments/{id}", never the actual id) plus the http.route attribute.
+	// ("GET /v1/payments/{id}", never the actual id); otelhttp sets http.route from the
+	// mux pattern (Go 1.22+ ServeMux), which Datadog uses as the span's resource name.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
-	mux.Handle("POST /v1/payments", otelhttp.NewHandler(
-		otelhttp.WithRouteTag("/v1/payments", http.HandlerFunc(svc.createPayment)), "POST /v1/payments"))
-	mux.Handle("GET /v1/payments/{id}", otelhttp.NewHandler(
-		otelhttp.WithRouteTag("/v1/payments/{id}", http.HandlerFunc(svc.getPayment)), "GET /v1/payments/{id}"))
+	mux.Handle("POST /v1/payments", otelhttp.NewHandler(http.HandlerFunc(svc.createPayment), "POST /v1/payments"))
+	mux.Handle("GET /v1/payments/{id}", otelhttp.NewHandler(http.HandlerFunc(svc.getPayment), "GET /v1/payments/{id}"))
 
 	srv := &http.Server{Addr: ":" + getenv("PORT", "8080"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

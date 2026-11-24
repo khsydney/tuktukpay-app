@@ -1,11 +1,9 @@
 'use strict';
 // Structured, trace-correlated logging for the Node.js services (docs/log-schema.md).
 //
-// pino writes one JSON line per event to stdout. The Splunk Distribution of
-// OpenTelemetry JS (loaded with `node -r @splunk/otel/instrument`) instruments pino:
-// it injects trace_id / span_id / trace_flags into every record and, with
-// SPLUNK_AUTOMATIC_LOG_COLLECTION=true, exports the same record over OTLP to the
-// collector, which forwards it to Splunk Cloud Platform (HEC).
+// pino writes one JSON line per event to stdout; the Datadog Agent collects it from the
+// container. dd-trace (DD_LOGS_INJECTION=true) adds dd.trace_id / dd.span_id / dd.service /
+// dd.env / dd.version to every record, so Datadog links each line to its trace.
 //
 // Conventions: `event` is a dotted event name (acquirer.timeout, ledger.write_failed);
 // business keys use the span attribute names (payment.id, merchant.id, ...); never a

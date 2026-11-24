@@ -12,7 +12,7 @@ The agent is instrumented with the OpenTelemetry GenAI semantic conventions
 (AGENT_PROVIDER=mock) so the workshop runs offline; openai / anthropic / bedrock work
 with the matching keys. Attack buttons in the UI make the agent misbehave the way real
 ones do (overspend, obey a poisoned listing, replay or forge a token, run unregistered)
-so participants can watch the mandate stop it and find the evidence in Splunk.
+so participants can watch the mandate stop it and find the evidence in Datadog.
 """
 
 from __future__ import annotations
@@ -44,7 +44,9 @@ log = setup_logging("shopping-agent")
 CHECKOUT_URL = os.getenv("CHECKOUT_URL", "http://localhost:8080").rstrip("/")
 WALLET_URL = os.getenv("WALLET_URL", "http://localhost:8088").rstrip("/")
 MERCHANT_URL = os.getenv("MERCHANT_SIM_URL", "http://localhost:8085").rstrip("/")
-SPLUNK_REALM = os.getenv("CONSOLE_SPLUNK_REALM", "")  # only for building trace links; never SPLUNK_REALM (the distro would bypass the collector)
+# Datadog site for "open trace" links only (datadoghq.com, ap1.datadoghq.com ...); empty = no links.
+DD_SITE = os.getenv("CONSOLE_DD_SITE", "")
+DD_APP_HOST = ("app." + DD_SITE) if DD_SITE in ("datadoghq.com", "datadoghq.eu") else DD_SITE
 PROVIDER = os.getenv("AGENT_PROVIDER", "mock")
 MODEL = os.getenv("AGENT_MODEL", "").split("#", 1)[0].strip()  # Compose keeps a trailing "# comment" when the value is empty
 GUARDRAIL_MODE = os.getenv("AGENT_GUARDRAIL", "flag")  # flag | strict
@@ -407,8 +409,8 @@ def healthz():
 
 @app.get("/config")
 def config():
-    return {"splunk_realm": SPLUNK_REALM, "provider": PROVIDER, "guardrail": GUARDRAIL_MODE,
-            "trace_url_template": f"https://app.{SPLUNK_REALM}.signalfx.com/#/apm/traces/{{trace_id}}" if SPLUNK_REALM else ""}
+    return {"dd_site": DD_SITE, "provider": PROVIDER, "guardrail": GUARDRAIL_MODE,
+            "trace_url_template": f"https://{DD_APP_HOST}/apm/trace/{{trace_id}}" if DD_SITE else ""}
 
 
 @app.get("/v1/agents")

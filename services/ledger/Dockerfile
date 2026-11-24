@@ -5,4 +5,4 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY . .
 EXPOSE 8084
-CMD ["node", "-r", "@splunk/otel/instrument", "server.js"]
+CMD ["node", "-r", "./dd-init.js", "server.js"]

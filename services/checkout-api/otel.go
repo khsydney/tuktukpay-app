@@ -7,86 +7,61 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
+	ddotel "github.com/DataDog/dd-trace-go/v2/ddtrace/opentelemetry"
+	ddmetric "github.com/DataDog/dd-trace-go/v2/ddtrace/opentelemetry/metric"
+	ddtracer "github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
+	"github.com/DataDog/dd-trace-go/v2/profiler"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
-// setupOTel wires the OpenTelemetry SDK: OTLP/gRPC exporters for traces, metrics
-// and logs pointed at the Splunk Distribution of the OpenTelemetry Collector
-// (OTEL_EXPORTER_OTLP_ENDPOINT), a resource built from OTEL_RESOURCE_ATTRIBUTES
-// (deployment.environment, service.version ...) and W3C trace-context +
-// baggage propagation. Nothing here is Splunk-specific: the same binary can
-// export to any OTLP backend, which is the whole "no lock-in" argument.
+// setupOTel keeps the service's OpenTelemetry API code (otelhttp, redisotel, the manual
+// spans and the tuktukpay.* metrics in main.go) and points it at Datadog:
 //
-// The Splunk Distribution of OpenTelemetry Go (github.com/signalfx/splunk-otel-go)
-// wraps this into a single distro.Run() call and adds Splunk defaults; we use the
-// upstream SDK here so every step is visible.
+//   - traces: dd-trace-go's OpenTelemetry TracerProvider. Every span created through the
+//     OTel API is a Datadog span, sent to the Datadog Agent (DD_AGENT_HOST:8126).
+//   - metrics: dd-trace-go's MeterProvider, which exports the OTel metrics over OTLP to the
+//     Datadog Agent (OTEL_EXPORTER_OTLP_ENDPOINT, port 4318). Off unless
+//     DD_METRICS_OTEL_ENABLED=true.
+//   - logs: stdout JSON only (logging.go); the Datadog Agent collects container logs.
+//   - Continuous Profiler when DD_PROFILING_ENABLED=true (Bits AI SRE reads profiles).
+//
+// Service, env and version come from DD_SERVICE / DD_ENV / DD_VERSION.
 func setupOTel(ctx context.Context) (func(context.Context) error, error) {
-	if os.Getenv("OTEL_SERVICE_NAME") == "" {
-		_ = os.Setenv("OTEL_SERVICE_NAME", serviceName)
+	if os.Getenv("DD_SERVICE") == "" {
+		_ = os.Setenv("DD_SERVICE", serviceName)
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithFromEnv(),      // OTEL_RESOURCE_ATTRIBUTES + OTEL_SERVICE_NAME
-		resource.WithTelemetrySDK(), // telemetry.sdk.*
-		resource.WithHost(),
-		resource.WithAttributes(semconv.ServiceNamespace("tuktukpay")),
-	)
-	if err != nil && !errors.Is(err, resource.ErrPartialResource) {
-		return nil, err
-	}
-
-	traceExp, err := otlptracegrpc.New(ctx) // endpoint/insecure from OTEL_EXPORTER_OTLP_* env
-	if err != nil {
-		return nil, err
-	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExp),
-		sdktrace.WithResource(res),
-		// AlwaysSample: the collector/back end keeps 100% of traces (Splunk NoSample).
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
-	)
+	tp := ddotel.NewTracerProvider(ddtracer.WithService(os.Getenv("DD_SERVICE")))
 	otel.SetTracerProvider(tp)
 
-	metricExp, err := otlpmetricgrpc.New(ctx)
+	mp, err := ddmetric.NewMeterProviderWithContext(ctx)
 	if err != nil {
+		_ = tp.Shutdown()
 		return nil, err
 	}
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(10*time.Second))),
-	)
 	otel.SetMeterProvider(mp)
 
-	// Logs: the same resource and endpoint. logging.go bridges slog into this
-	// provider, so every log line reaches the collector with trace_id / span_id.
-	logExp, err := otlploggrpc.New(ctx)
-	if err != nil {
-		return nil, err
+	profiling := strings.EqualFold(os.Getenv("DD_PROFILING_ENABLED"), "true")
+	if profiling {
+		if err := profiler.Start(profiler.WithService(os.Getenv("DD_SERVICE"))); err != nil {
+			fmt.Fprintf(os.Stderr, "datadog profiler not started: %v\n", err)
+			profiling = false
+		}
 	}
-	lp := sdklog.NewLoggerProvider(
-		sdklog.WithResource(res),
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
-	)
-	global.SetLoggerProvider(lp)
 
+	// W3C trace context for otelhttp / the Redis stream messages; dd-trace-go reads and
+	// writes the same traceparent, and the x-datadog-* headers as well.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		tolerantTraceContext{}, propagation.Baggage{},
 	))
 
 	return func(ctx context.Context) error {
-		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx), lp.Shutdown(ctx))
+		if profiling {
+			profiler.Stop()
+		}
+		return errors.Join(ddmetric.Shutdown(ctx, mp), tp.Shutdown())
 	}, nil
 }
 

@@ -2,7 +2,7 @@
 
 Normally answers 200 quickly. With the `webhook_merchant_flaky` chaos flag it
 returns 500s / responds slowly for one merchant, which makes webhook-dispatcher
-retry and (eventually) dead-letter. Auto-instrumented with the Splunk distro.
+retry and (eventually) dead-letter. Auto-instrumented by ddtrace-run.
 """
 
 from __future__ import annotations
