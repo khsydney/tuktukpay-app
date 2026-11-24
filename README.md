@@ -29,7 +29,7 @@ crash-loops the wallet. Docker Compose remains as a lighter alternative for lapt
 
 ### Screenshots
 
-**War Room control panel** — <http://localhost:8090>: storyline presets and individual failure injections.
+**War Room control panel** — <http://localhost:8090>: a run sheet across the top (pick an act, open its guide or run it) and one tile per failure injection below.
 
 ![War Room control panel](docs/images/war-room.png)
 
